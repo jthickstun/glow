@@ -21,6 +21,44 @@ learn = tf.contrib.learn
 # Surpress verbose warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
+def infer(sess, model, hps, iterator):
+    # Example of using model in inference mode. Load saved model using hps.restore_path
+    # Can provide x, y from files instead of dataset iterator
+    # If model is uncondtional, always pass y = np.zeros([bs], dtype=np.int32)
+    y = np.zeros([hps.n_batch_test], dtype=np.int32)
+    if hps.direct_iterator:
+        iterator = iterator.get_next()
+        x0, y0 = sess.run(iterator)
+        x1, y1 = sess.run(iterator)
+    else:
+        x0, y0 = iterator()
+        x1, y1 = iterator()
+
+    cv2.imwrite("gt0.png", x0[0].astype(np.uint8)[:,:,::-1])
+    cv2.imwrite("gt1.png", x1[0].astype(np.uint8)[:,:,::-1])
+
+    mixed = (x0 + x1)/2.
+    cv2.imwrite("mixed.png", mixed[0].clip(0,255).astype(np.uint8)[:,:,::-1])
+
+    # init not too far from the right answer (since we don't have coarser noise models yet)
+    x0 = x0 + .1*256*np.random.randn(hps.n_batch_test,32,32,3)
+    x1 = x1 + .1*256*np.random.randn(hps.n_batch_test,32,32,3)
+
+    eta = 0#0.00002
+    lambda_recon = 1.
+    for i in range(100):
+        grad_x0 = model.grad_logprob(x0,y)[0]
+        grad_x1 = model.grad_logprob(x1,y)[0]
+
+#        x0 = x0 + eta * (grad_x0 - lambda_recon * (x0 + x1 - mixed) / 256.)
+#        x1 = x1 + eta * (grad_x1 - lambda_recon * (x0 + x1 - mixed) / 256.)
+        x0 = x0 + eta * (-lambda_recon * (x0 + x1 - mixed) / 256.)
+        x1 = x1 + eta * (-lambda_recon * (x0 + x1 - mixed) / 256.)
+
+    cv2.imwrite("x.png", x0[0].clip(0,255).astype(np.uint8)[:,:,::-1])
+    cv2.imwrite("y.png", x1[0].clip(0,255).astype(np.uint8)[:,:,::-1])
+
+
 # ===
 # Code for getting data
 # ===
@@ -105,44 +143,6 @@ def main(hps):
     model = model.model(sess, hps, train_iterator, test_iterator, data_init, train=False)
 
     infer(sess, model, hps, test_iterator)
-
-
-def infer(sess, model, hps, iterator):
-    # Example of using model in inference mode. Load saved model using hps.restore_path
-    # Can provide x, y from files instead of dataset iterator
-    # If model is uncondtional, always pass y = np.zeros([bs], dtype=np.int32)
-    y = np.zeros([hps.n_batch_test], dtype=np.int32)
-    if hps.direct_iterator:
-        iterator = iterator.get_next()
-        x0, y0 = sess.run(iterator)
-        x1, y1 = sess.run(iterator)
-    else:
-        x0, y0 = iterator()
-        x1, y1 = iterator()
-
-    cv2.imwrite("gt0.png", x0[0].astype(np.uint8)[:,:,::-1])
-    cv2.imwrite("gt1.png", x1[0].astype(np.uint8)[:,:,::-1])
-
-    mixed = (x0 + x1)/2.
-    cv2.imwrite("mixed.png", mixed[0].clip(0,255).astype(np.uint8)[:,:,::-1])
-
-    # init not too far from the right answer (since we don't have coarser noise models yet)
-    x0 = x0 + .1*256*np.random.randn(hps.n_batch_test,32,32,3)
-    x1 = x1 + .1*256*np.random.randn(hps.n_batch_test,32,32,3)
-
-    eta = 0#0.00002
-    lambda_recon = 1.
-    for i in range(100):
-        grad_x0 = model.grad_logprob(x0,y)[0]
-        grad_x1 = model.grad_logprob(x1,y)[0]
-
-#        x0 = x0 + eta * (grad_x0 - lambda_recon * (x0 + x1 - mixed) / 256.)
-#        x1 = x1 + eta * (grad_x1 - lambda_recon * (x0 + x1 - mixed) / 256.)
-        x0 = x0 + eta * (-lambda_recon * (x0 + x1 - mixed) / 256.)
-        x1 = x1 + eta * (-lambda_recon * (x0 + x1 - mixed) / 256.)
-
-    cv2.imwrite("x.png", x0[0].clip(0,255).astype(np.uint8)[:,:,::-1])
-    cv2.imwrite("y.png", x1[0].clip(0,255).astype(np.uint8)[:,:,::-1])
 
 
 # Get number of training and validation iterations
