@@ -133,20 +133,16 @@ def infer(sess, model, hps, iterator):
     eta = 0#0.00002
     lambda_recon = 1.
     for i in range(100):
-        grad_x0 = model.logprob(x0,y)
-        grad_x1 = model.logprob(x1,y)
+        grad_x0 = model.grad_logprob(x0,y)[0]
+        grad_x1 = model.grad_logprob(x1,y)[0]
 
-        print(type(grad_x0),grad_x0.shape)
-        print(type(grad_x1),grad_x1.shape)
-        print(type(x0),x0.shape)
-        print(type(mixed),mixed.shape)
-        x0 = x0 + eta * (grad_x0 - lambda_recon * (x0 + x1 - mixed) / 256.)
-        x1 = x1 + eta * (grad_x1 - lambda_recon * (x0 + x1 - mixed) / 256.)
-        print('hi!')
-        raise
+#        x0 = x0 + eta * (grad_x0 - lambda_recon * (x0 + x1 - mixed) / 256.)
+#        x1 = x1 + eta * (grad_x1 - lambda_recon * (x0 + x1 - mixed) / 256.)
+        x0 = x0 + eta * (-lambda_recon * (x0 + x1 - mixed) / 256.)
+        x1 = x1 + eta * (-lambda_recon * (x0 + x1 - mixed) / 256.)
 
-    cv2.imwrite("x.png", (255*x0[0]).clip(0,255).astype(np.uint8)[:,:,::-1])
-    cv2.imwrite("y.png", (255*x1[0]).clip(0,255).astype(np.uint8)[:,:,::-1])
+    cv2.imwrite("x.png", x0[0].clip(0,255).astype(np.uint8)[:,:,::-1])
+    cv2.imwrite("y.png", x1[0].clip(0,255).astype(np.uint8)[:,:,::-1])
 
 
 # Get number of training and validation iterations
