@@ -43,6 +43,9 @@ def abstract_model_xy(sess, hps, feeds, train_iterator, test_iterator, data_init
         else:
             def _train(_lr):
                 _x, _y = train_iterator()
+                _x = _x.astype(np.float32)
+                noise = np.random.normal(size=_x.shape) * hps.noise_level * 255
+                _x += noise
                 return sess.run([train_op, stats_train], {feeds['x']: _x,
                                                           feeds['y']: _y, lr: _lr})[1]
             m.train = _train

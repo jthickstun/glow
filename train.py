@@ -152,7 +152,10 @@ def main(hps):
     # Create log dir
     logdir = os.path.abspath(hps.logdir) + "/"
     if not os.path.exists(logdir):
-        os.mkdir(logdir)
+        try:
+            os.mkdir(logdir)
+        except:
+            pass
 
     # Create model
     import model
@@ -416,6 +419,9 @@ if __name__ == "__main__":
                         help="Type of flow. 0=reverse (realnvp), 1=shuffle, 2=invconv (ours)")
     parser.add_argument("--flow_coupling", type=int, default=0,
                         help="Coupling type: 0=additive, 1=affine")
+
+    parser.add_argument("--noise_level", type=float, default=0,
+                        help="Amount of noise to add")
 
     hps = parser.parse_args()  # So error if typo
     main(hps)
