@@ -12,7 +12,7 @@ f_loss: function with as input the (x,y,reuse=False), and as output a list/tuple
 '''
 
 
-def abstract_model_xy(sess, hps, feeds, train_iterator, test_iterator, data_init, lr, f_loss):
+def abstract_model_xy(sess, hps, feeds, train_iterator, test_iterator, data_init, lr, f_loss, train=True):
 
     # == Create class with static fields and methods
     class m(object):
@@ -21,30 +21,33 @@ def abstract_model_xy(sess, hps, feeds, train_iterator, test_iterator, data_init
     m.feeds = feeds
     m.lr = lr
 
+    print('Defining graph... ')
+
     # === Loss and optimizer
-    loss_train, stats_train = f_loss(train_iterator, True)
+    loss_train, stats_train = f_loss(train_iterator, train)
     all_params = tf.trainable_variables()
-    if hps.gradient_checkpointing == 1:
-        from memory_saving_gradients import gradients
-        gs = gradients(loss_train, all_params)
-    else:
-        gs = tf.gradients(loss_train, all_params)
+    if train:
+        if hps.gradient_checkpointing == 1:
+            from memory_saving_gradients import gradients
+            gs = gradients(loss_train, all_params)
+        else:
+            gs = tf.gradients(loss_train, all_params)
 
-    optimizer = {'adam': optim.adam, 'adamax': optim.adamax,
-                 'adam2': optim.adam2}[hps.optimizer]
+        optimizer = {'adam': optim.adam, 'adamax': optim.adamax,
+                     'adam2': optim.adam2}[hps.optimizer]
 
-    train_op, polyak_swap_op, ema = optimizer(
-        all_params, gs, alpha=lr, hps=hps)
-    if hps.direct_iterator:
-        m.train = lambda _lr: sess.run([train_op, stats_train], {lr: _lr})[1]
-    else:
-        def _train(_lr):
-            _x, _y = train_iterator()
-            return sess.run([train_op, stats_train], {feeds['x']: _x,
-                                                      feeds['y']: _y, lr: _lr})[1]
-        m.train = _train
+        train_op, polyak_swap_op, ema = optimizer(
+            all_params, gs, alpha=lr, hps=hps)
+        if hps.direct_iterator:
+            m.train = lambda _lr: sess.run([train_op, stats_train], {lr: _lr})[1]
+        else:
+            def _train(_lr):
+                _x, _y = train_iterator()
+                return sess.run([train_op, stats_train], {feeds['x']: _x,
+                                                          feeds['y']: _y, lr: _lr})[1]
+            m.train = _train
 
-    m.polyak_swap = lambda: sess.run(polyak_swap_op)
+        m.polyak_swap = lambda: sess.run(polyak_swap_op)
 
     # === Testing
     loss_test, stats_test = f_loss(test_iterator, False, reuse=True)
@@ -59,11 +62,16 @@ def abstract_model_xy(sess, hps, feeds, train_iterator, test_iterator, data_init
 
     # === Saving and restoring
     saver = tf.train.Saver()
-    saver_ema = tf.train.Saver(ema.variables_to_restore())
-    m.save_ema = lambda path: saver_ema.save(
-        sess, path, write_meta_graph=False)
-    m.save = lambda path: saver.save(sess, path, write_meta_graph=False)
+
+    if train:
+        saver_ema = tf.train.Saver(ema.variables_to_restore())
+        m.save_ema = lambda path: saver_ema.save(
+            sess, path, write_meta_graph=False)
+        m.save = lambda path: saver.save(sess, path, write_meta_graph=False)
+
     m.restore = lambda path: saver.restore(sess, path)
+
+    print('Restoring model... ')
 
     # === Initialize the parameters
     if hps.restore_path != '':
@@ -138,7 +146,7 @@ def prior(name, y_onehot, hps):
     return logp, sample, eps
 
 
-def model(sess, hps, train_iterator, test_iterator, data_init):
+def model(sess, hps, train_iterator, test_iterator, data_init, train=True):
 
     # Only for decoding/init, rest use iterators directly
     with tf.name_scope('input'):
@@ -220,7 +228,9 @@ def model(sess, hps, train_iterator, test_iterator, data_init):
 
     feeds = {'x': X, 'y': Y}
     m = abstract_model_xy(sess, hps, feeds, train_iterator,
-                          test_iterator, data_init, lr, f_loss)
+                          test_iterator, data_init, lr, f_loss, train=train)
+
+    print('Defining sampling graph...')
 
     # === Sampling function
     def f_sample(y, eps_std):
@@ -242,6 +252,8 @@ def model(sess, hps, train_iterator, test_iterator, data_init):
         return m.sess.run(x_sampled, {Y: _y, m.eps_std: _eps_std})
     m.sample = sample
 
+    print('Defining inference graph...')
+
     if hps.inference:
         # === Encoder-Decoder functions
         def f_encode(x, y, reuse=True):
@@ -250,12 +262,12 @@ def model(sess, hps, train_iterator, test_iterator, data_init):
 
                 # Discrete -> Continuous
                 objective = tf.zeros_like(x, dtype='float32')[:, 0, 0, 0]
-                z = preprocess(x)
-                z = z + tf.random_uniform(tf.shape(z), 0, 1. / hps.n_bins)
-                objective += - np.log(hps.n_bins) * np.prod(Z.int_shape(z)[1:])
+                x = preprocess(x)
+                x = x + tf.random_uniform(tf.shape(x), 0, 1. / hps.n_bins)
+                objective += - np.log(hps.n_bins) * np.prod(Z.int_shape(x)[1:])
 
                 # Encode
-                z = Z.squeeze2d(z, 2)  # > 16x16x12
+                z = Z.squeeze2d(x, 2)  # > 16x16x12
                 z, objective, eps = encoder(z, objective)
 
                 # Prior
@@ -264,7 +276,9 @@ def model(sess, hps, train_iterator, test_iterator, data_init):
                 objective += logp(z)
                 eps.append(_eps(z))
 
-            return eps
+                grad_objective = tf.gradients(objective, x)
+
+            return eps,objective,grad_objective
 
         def f_decode(y, eps, reuse=True):
             with tf.variable_scope('model', reuse=reuse):
@@ -278,7 +292,7 @@ def model(sess, hps, train_iterator, test_iterator, data_init):
 
             return x
 
-        enc_eps = f_encode(X, Y)
+        enc_eps,logpz,grad_logpz = f_encode(X, Y)
         dec_eps = []
         print(enc_eps)
         for i, _eps in enumerate(enc_eps):
@@ -312,8 +326,19 @@ def model(sess, hps, train_iterator, test_iterator, data_init):
                 feed_dict[dec_eps[i]] = eps[i]
             return sess.run(dec_x, feed_dict)
 
+        def logprob(x, y):
+            return sess.run(logpz, {X: x, Y: y})
+
+        def grad_logprob(x, y):
+            return sess.run(grad_logpz, {X: x, Y: y})
+
         m.encode = encode
         m.decode = decode
+
+        m.logprob = logprob
+        m.grad_logprob = grad_logprob
+
+    print('Done with model definitions')
 
     return m
 
