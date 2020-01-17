@@ -12,6 +12,9 @@ import tensorflow as tf
 import graphics
 from utils import ResultLogger
 
+import tfops as Z
+from model import prior
+
 learn = tf.contrib.learn
 
 # Surpress verbose warnings
@@ -172,8 +175,9 @@ def infer(sess, model, hps, iterator):
     if hps.direct_iterator:
         iterator = iterator.get_next()
 
-    xs = []
-    zs = []
+    print('Running inference on {} data points'.format(hps.full_test_its*hps.n_batch_test))
+    logpz = []
+    grad_logpz = []
     for it in range(hps.full_test_its):
         if hps.direct_iterator:
             # replace with x, y, attr if you're getting CelebA attributes, also modify get_data
@@ -181,16 +185,19 @@ def infer(sess, model, hps, iterator):
         else:
             x, y = iterator()
 
-        z = model.encode(x, y)
-        x = model.decode(y, z)
-        xs.append(x)
-        zs.append(z)
+        # preprocess
+        x = x/256. - .5
 
-    x = np.concatenate(xs, axis=0)
-    z = np.concatenate(zs, axis=0)
-    np.save('logs/x.npy', x)
-    np.save('logs/z.npy', z)
-    return zs
+        logpz.append(model.logprob(x,y))
+        grad_logpz.append(model.grad_logprob(x,y))
+
+    logpz = np.concatenate(logpz, axis=0)
+    np.save('logs/logpz.npy', logpz)
+
+    grad_logpz = np.concatenate(grad_logpz, axis=0)
+    np.save('logs/grad_logpz.npy', grad_logpz)
+
+    print('NLL = {}'.format(-logpz.mean()/(32*32*3*np.log(2))))
 
 
 def train(sess, model, hps, logdir, visualise):

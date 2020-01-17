@@ -153,6 +153,8 @@ def model(sess, hps, train_iterator, test_iterator, data_init, train=True):
         X = tf.placeholder(
             tf.uint8, [None, hps.image_size, hps.image_size, 3], name='image')
         Y = tf.placeholder(tf.int32, [None], name='label')
+        Xc = tf.placeholder(
+             tf.float32, [None, hps.image_size, hps.image_size, 3], name='imagec')
         lr = tf.placeholder(tf.float32, None, name='learning_rate')
 
     encoder, decoder = codec(hps)
@@ -262,7 +264,7 @@ def model(sess, hps, train_iterator, test_iterator, data_init, train=True):
 
                 # Discrete -> Continuous
                 objective = tf.zeros_like(x, dtype='float32')[:, 0, 0, 0]
-                x = preprocess(x)
+                #x = preprocess(x)
                 x = x + tf.random_uniform(tf.shape(x), 0, 1. / hps.n_bins)
                 objective += - np.log(hps.n_bins) * np.prod(Z.int_shape(x)[1:])
 
@@ -292,7 +294,7 @@ def model(sess, hps, train_iterator, test_iterator, data_init, train=True):
 
             return x
 
-        enc_eps,logpz,grad_logpz = f_encode(X, Y)
+        enc_eps,logpz,grad_logpz = f_encode(Xc, Y)
         dec_eps = []
         print(enc_eps)
         for i, _eps in enumerate(enc_eps):
@@ -317,7 +319,7 @@ def model(sess, hps, train_iterator, test_iterator, data_init, train=True):
 
         # If model is uncondtional, always pass y = np.zeros([bs], dtype=np.int32)
         def encode(x, y):
-            return flatten_eps(sess.run(enc_eps, {X: x, Y: y}))
+            return flatten_eps(sess.run(enc_eps, {Xc: x, Y: y}))
 
         def decode(y, feps):
             eps = unflatten_eps(feps)
@@ -327,10 +329,10 @@ def model(sess, hps, train_iterator, test_iterator, data_init, train=True):
             return sess.run(dec_x, feed_dict)
 
         def logprob(x, y):
-            return sess.run(logpz, {X: x, Y: y})
+            return sess.run(logpz, {Xc: x, Y: y})
 
         def grad_logprob(x, y):
-            return sess.run(grad_logpz, {X: x, Y: y})
+            return sess.run(grad_logpz, {Xc: x, Y: y})[0]
 
         m.encode = encode
         m.decode = decode
