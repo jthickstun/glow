@@ -37,26 +37,36 @@ def infer(sess, model, hps, iterator):
     cv2.imwrite("gt0.png", x0[0].astype(np.uint8)[:,:,::-1])
     cv2.imwrite("gt1.png", x1[0].astype(np.uint8)[:,:,::-1])
 
-    mixed = (x0 + x1)/2.
-    cv2.imwrite("mixed.png", mixed[0].clip(0,255).astype(np.uint8)[:,:,::-1])
+    mixed = x0 + x1
+    cv2.imwrite("mixed.png", (mixed[0]/2.).clip(0,255).astype(np.uint8)[:,:,::-1])
+
+    # preprocessing
+    mixed = mixed/256. - .5
 
     # init not too far from the right answer (since we don't have coarser noise models yet)
-    x0 = x0 + .1*256*np.random.randn(hps.n_batch_test,32,32,3)
-    x1 = x1 + .1*256*np.random.randn(hps.n_batch_test,32,32,3)
+    x0 = x0/256. - .5 + .1*np.random.randn(hps.n_batch_test,32,32,3)
+    x1 = x1/256. - .5 + .1*np.random.randn(hps.n_batch_test,32,32,3)
 
-    eta = 0#0.00002
-    lambda_recon = 1.
+    cv2.imwrite("x_init.png", (256*(x0[0]+.5)).clip(0,255).astype(np.uint8)[:,:,::-1])
+    cv2.imwrite("y_init.png", (256*(x1[0]+.5)).clip(0,255).astype(np.uint8)[:,:,::-1])
+
+    eta = 0.00001
+    lambda_recon = 100.
     for i in range(100):
-        grad_x0 = model.grad_logprob(x0,y)[0]
-        grad_x1 = model.grad_logprob(x1,y)[0]
+        recon = (x0 + x1 - mixed)**2
+        print('recon: {}, logpx: {}, logpy: {}'.format(recon[0].sum(),model.logprob(x0,y)[0],model.logprob(x1,y)[0]))
+        grad_x0 = model.grad_logprob(x0,y)
+        grad_x1 = model.grad_logprob(x1,y)
 
-#        x0 = x0 + eta * (grad_x0 - lambda_recon * (x0 + x1 - mixed) / 256.)
-#        x1 = x1 + eta * (grad_x1 - lambda_recon * (x0 + x1 - mixed) / 256.)
-        x0 = x0 + eta * (-lambda_recon * (x0 + x1 - mixed) / 256.)
-        x1 = x1 + eta * (-lambda_recon * (x0 + x1 - mixed) / 256.)
+        #x0 = x0 + eta * (grad_x0 - lambda_recon * (x0 + x1 - mixed))
+        x0 = x0 + eta * grad_x0
+        #x0 = x0 - eta * lambda_recon * (x0 + x1 - mixed)
+        #x1 = x1 + eta * (grad_x1 - lambda_recon * (x0 + x1 - mixed))
+        x1 = x1 + eta * grad_x1
+        #x1 = x1 - eta * lambda_recon * (x0 + x1 - mixed)
 
-    cv2.imwrite("x.png", x0[0].clip(0,255).astype(np.uint8)[:,:,::-1])
-    cv2.imwrite("y.png", x1[0].clip(0,255).astype(np.uint8)[:,:,::-1])
+    cv2.imwrite("x.png", (256*(x0[0]+.5)).clip(0,255).astype(np.uint8)[:,:,::-1])
+    cv2.imwrite("y.png", (256*(x1[0]+.5)).clip(0,255).astype(np.uint8)[:,:,::-1])
 
 
 # ===
