@@ -154,7 +154,7 @@ def model(sess, hps, train_iterator, test_iterator, data_init, train=True):
     # Only for decoding/init, rest use iterators directly
     with tf.name_scope('input'):
         X = tf.placeholder(
-            tf.uint8, [None, hps.image_size, hps.image_size, 3], name='image')
+            tf.float32, [None, hps.image_size, hps.image_size, 3], name='image')
         Y = tf.placeholder(tf.int32, [None], name='label')
         Xc = tf.placeholder(
              tf.float32, [None, hps.image_size, hps.image_size, 3], name='imagec')

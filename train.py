@@ -253,7 +253,7 @@ def train(sess, model, hps, logdir, visualise):
             train_logger.log(epoch=epoch, n_processed=n_processed, n_images=n_images, train_time=int(
                 train_time), **process_results(train_results))
 
-        if epoch < 10 or (epoch < 50 and epoch % 10 == 0) or epoch % hps.epochs_full_valid == 0:
+        if epoch < 10 or (epoch < 50 and epoch % 10 == 0) or (epoch % hps.epochs_full_valid == 0):
             test_results = []
             msg = ''
 

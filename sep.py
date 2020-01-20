@@ -21,10 +21,10 @@ learn = tf.contrib.learn
 # Surpress verbose warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-def infer(sess, model, hps, iterator):
-    # Example of using model in inference mode. Load saved model using hps.restore_path
-    # Can provide x, y from files instead of dataset iterator
-    # If model is uncondtional, always pass y = np.zeros([bs], dtype=np.int32)
+def generate_mixture(hps, iterator, sess):
+    """
+    Generates a mixture and returns the noisy samples used
+    """
     y = np.zeros([hps.n_batch_test], dtype=np.int32)
     if hps.direct_iterator:
         iterator = iterator.get_next()
@@ -52,8 +52,8 @@ def infer(sess, model, hps, iterator):
     print('RECON2: {}'.format(recon[0].sum()))
 
     # add some noise to make it interesting
-    x0 += .1*np.random.randn(hps.n_batch_test,32,32,3)
-    x1 += .1*np.random.randn(hps.n_batch_test,32,32,3)
+    x0 += .3*np.random.randn(hps.n_batch_test,32,32,3)
+    x1 += .3*np.random.randn(hps.n_batch_test,32,32,3)
 
     recon = (x0 + x1 - 2*mixed)**2
     print('RECON3: {}'.format(recon[0].sum()))
@@ -61,9 +61,21 @@ def infer(sess, model, hps, iterator):
     write_images(x0, 'x_init_pt1.png')
     write_images(x1, 'y_init_pt1.png')
 
+    return mixed, x0, x1
+
+
+def infer(sess, model, hps, iterator, mixed, x0, x1):
+    # Example of using model in inference mode. Load saved model using hps.restore_path
+    # Can provide x, y from files instead of dataset iterator
+    # If model is uncondtional, always pass y = np.zeros([bs], dtype=np.int32)
+
+    y = np.zeros([hps.n_batch_test], dtype=np.int32)
+
     eta = 0.00001
     lambda_recon = 1000.
     for i in range(500):
+        if i % 10 == 0:
+            print("Iteration {}".format(i))
         recon = (x0 + x1 - 2*mixed)**2
         print('recon: {}, logpx: {}, logpy: {}'.format(recon[0].sum(),model.logprob(x0,y)[0],model.logprob(x1,y)[0]))
         grad_x0 = model.grad_logprob(x0,y)
@@ -78,6 +90,7 @@ def infer(sess, model, hps, iterator):
 
     write_images(x0, 'x.png')
     write_images(x1, 'y.png')
+    return x0, x1
 
 def write_images(x,name):
     panel = np.zeros([7*32,7*32,3],dtype=np.uint8)
@@ -145,7 +158,7 @@ def get_data(hps, sess):
 
 
 def main(hps):
-
+    
     # Initialize Horovod.
     hvd.init()
 
@@ -165,13 +178,22 @@ def main(hps):
     if not os.path.exists(logdir):
         os.mkdir(logdir)
 
+
+    mixed, x0, x1 = generate_mixture(hps, test_iterator, sess) 
+
     hps.inference = True
+    all_checkpoints = hps.restore_paths
+    for checkpoint in all_checkpoints:
+        hps.restore_path = checkpoint
+        print("Using checkpoint {}".format(hps.restore_path))
 
-    # Create model
-    import model
-    model = model.model(sess, hps, train_iterator, test_iterator, data_init, train=False)
+        # Create model
+        import model
+        curr_model = model.model(sess, hps, train_iterator, test_iterator, data_init, train=False)
 
-    infer(sess, model, hps, test_iterator)
+        x0, x1 = infer(sess, curr_model, hps, test_iterator, mixed, x0, x1)
+        tf.reset_default_graph()
+        sess = tensorflow_session()
 
 
 # Get number of training and validation iterations
@@ -214,8 +236,8 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--verbose", action='store_true', help="Verbose mode")
-    parser.add_argument("--restore_path", type=str, default='',
-                        help="Location of checkpoint to restore")
+    parser.add_argument("--restore_paths", nargs="+", required=True,
+                        help="Location of checkpoint to restore in order")
     parser.add_argument("--logdir", type=str,
                         default='./logs', help="Location to save logs")
 
