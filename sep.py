@@ -42,21 +42,19 @@ def generate_mixture(hps, iterator, sess):
     write_images(mixed, 'mixed.png')
 
     # init not too far from the right answer (since we don't have coarser noise models yet)
-    x0 = x0/256. - .5
-    x1 = x1/256. - .5
+    #x0 = x0/256. - .5
+    #x1 = x1/256. - .5
 
-    write_images(x0, 'xgt.png')
-    write_images(x1, 'ygt.png')
+    write_images(x0/256.-.5, 'xgt.png')
+    write_images(x1/256.-.5, 'ygt.png')
 
     recon = (x0 + x1 - 2*mixed)**2
-    print('RECON2: {}'.format(recon[0].sum()))
 
     # add some noise to make it interesting
-    x0 += .3*np.random.randn(hps.n_batch_test,32,32,3)
-    x1 += .3*np.random.randn(hps.n_batch_test,32,32,3)
+    x0 = np.random.randn(hps.n_batch_test,32,32,3)
+    x1 = np.random.randn(hps.n_batch_test,32,32,3)
 
     recon = (x0 + x1 - 2*mixed)**2
-    print('RECON3: {}'.format(recon[0].sum()))
 
     write_images(x0, 'x_init_pt1.png')
     write_images(x1, 'y_init_pt1.png')
@@ -64,16 +62,16 @@ def generate_mixture(hps, iterator, sess):
     return mixed, x0, x1
 
 
-def infer(sess, model, hps, iterator, mixed, x0, x1):
+def infer(sess, model, hps, iterator, mixed, x0, x1, sigma):
     # Example of using model in inference mode. Load saved model using hps.restore_path
     # Can provide x, y from files instead of dataset iterator
     # If model is uncondtional, always pass y = np.zeros([bs], dtype=np.int32)
 
     y = np.zeros([hps.n_batch_test], dtype=np.int32)
 
-    eta = 0.00001
-    lambda_recon = 1000.
-    for i in range(500):
+    eta = .00002 * (sigma / .01) ** 2
+    lambda_recon = 3./(sigma**2)
+    for i in range(100):
         if i % 10 == 0:
             print("Iteration {}".format(i))
         recon = (x0 + x1 - 2*mixed)**2
@@ -81,10 +79,13 @@ def infer(sess, model, hps, iterator, mixed, x0, x1):
         grad_x0 = model.grad_logprob(x0,y)
         grad_x1 = model.grad_logprob(x1,y)
 
-        x0 = x0 + eta * (grad_x0 - lambda_recon * (x0 + x1 - 2*mixed))
+        epsilon0 = np.sqrt(2*eta)*np.random.randn(hps.n_batch_test,32,32,3)
+        epsilon1 = np.sqrt(2*eta)*np.random.randn(hps.n_batch_test,32,32,3)
+
+        x0 = x0 + eta * (grad_x0 - lambda_recon * (x0 + x1 - 2*mixed)) + epsilon0
         #x0 = x0 + eta * grad_x0
         #x0 = x0 - eta * lambda_recon * (x0 + x1 - 2*mixed)
-        x1 = x1 + eta * (grad_x1 - lambda_recon * (x0 + x1 - 2*mixed))
+        x1 = x1 + eta * (grad_x1 - lambda_recon * (x0 + x1 - 2*mixed)) + epsilon1
         #x1 = x1 + eta * grad_x1
         #x1 = x1 - eta * lambda_recon * (x0 + x1 - 2*mixed)
 
@@ -182,16 +183,18 @@ def main(hps):
     mixed, x0, x1 = generate_mixture(hps, test_iterator, sess) 
 
     hps.inference = True
-    all_checkpoints = hps.restore_paths
-    for checkpoint in all_checkpoints:
-        hps.restore_path = checkpoint
+    sigmas = np.array([1., 0.35938137, 0.21544347, 0.07742637, 0.04641589, 0.01])
+    all_checkpoints = ['logs1point0','logs0point359','logs0point21','logs0point077','logs0point04','logs0point0']
+    #all_checkpoints = hps.restore_paths
+    for sigma,checkpoint in zip(sigmas,all_checkpoints):
+        hps.restore_path = 'cifar10logs/{}/model_best_loss.ckpt'.format(checkpoint)
         print("Using checkpoint {}".format(hps.restore_path))
 
         # Create model
         import model
         curr_model = model.model(sess, hps, train_iterator, test_iterator, data_init, train=False)
 
-        x0, x1 = infer(sess, curr_model, hps, test_iterator, mixed, x0, x1)
+        x0, x1 = infer(sess, curr_model, hps, test_iterator, mixed, x0, x1, sigma)
         tf.reset_default_graph()
         sess = tensorflow_session()
 
@@ -236,8 +239,6 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--verbose", action='store_true', help="Verbose mode")
-    parser.add_argument("--restore_paths", nargs="+", required=True,
-                        help="Location of checkpoint to restore in order")
     parser.add_argument("--logdir", type=str,
                         default='./logs', help="Location to save logs")
 
