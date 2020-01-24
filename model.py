@@ -43,9 +43,6 @@ def abstract_model_xy(sess, hps, feeds, train_iterator, test_iterator, data_init
         else:
             def _train(_lr):
                 _x, _y = train_iterator()
-                _x = _x.astype(np.float32)
-                noise = np.random.normal(size=_x.shape) * hps.noise_level * 255
-                _x += noise
                 return sess.run([train_op, stats_train], {feeds['x']: _x,
                                                           feeds['y']: _y, lr: _lr})[1]
             m.train = _train
@@ -165,6 +162,10 @@ def model(sess, hps, train_iterator, test_iterator, data_init, train=True):
 
     def preprocess(x):
         x = tf.cast(x, 'float32')
+
+        noise = tf.random.normal(tf.shape(x)) * hps.noise_level
+        x += noise
+
         if hps.n_bits_x < 8:
             x = tf.floor(x / 2 ** (8 - hps.n_bits_x))
         x = x / hps.n_bins - .5
@@ -220,6 +221,7 @@ def model(sess, hps, train_iterator, test_iterator, data_init, train=True):
     def f_loss(iterator, is_training, reuse=False):
         if hps.direct_iterator and iterator is not None:
             x, y = iterator.get_next()
+
         else:
             x, y = X, Y
 
