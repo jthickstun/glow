@@ -51,13 +51,13 @@ def generate_mixture(hps, iterator, sess):
     recon = (x0 + x1 - 2*mixed)**2
 
     # add some noise to make it interesting
-    x0 = np.random.randn(hps.n_batch_test,32,32,3)
-    x1 = np.random.randn(hps.n_batch_test,32,32,3)
+    x0 = np.random.randn(*x0.shape)
+    x1 = np.random.randn(*x1.shape)
 
     recon = (x0 + x1 - 2*mixed)**2
 
-    write_images(x0, 'x_init_pt1.png')
-    write_images(x1, 'y_init_pt1.png')
+    write_images(x0, 'x_init.png')
+    write_images(x1, 'y_init.png')
 
     return mixed, x0, x1
 
@@ -70,17 +70,13 @@ def infer(sess, model, hps, iterator, mixed, x0, x1, sigma):
     y = np.zeros([hps.n_batch_test], dtype=np.int32)
 
     eta = .00002 * (sigma / .01) ** 2
-    lambda_recon = 3./(sigma**2)
+    lambda_recon = 1.0/(sigma**2)
     for i in range(100):
-        if i % 10 == 0:
-            print("Iteration {}".format(i))
-        recon = (x0 + x1 - 2*mixed)**2
-        print('recon: {}, logpx: {}, logpy: {}'.format(recon[0].sum(),model.logprob(x0,y)[0],model.logprob(x1,y)[0]))
         grad_x0 = model.grad_logprob(x0,y)
         grad_x1 = model.grad_logprob(x1,y)
 
-        epsilon0 = np.sqrt(2*eta)*np.random.randn(hps.n_batch_test,32,32,3)
-        epsilon1 = np.sqrt(2*eta)*np.random.randn(hps.n_batch_test,32,32,3)
+        epsilon0 = np.sqrt(2*eta)*np.random.randn(*x0.shape)
+        epsilon1 = np.sqrt(2*eta)*np.random.randn(*x1.shape)
 
         x0 = x0 + eta * (grad_x0 - lambda_recon * (x0 + x1 - 2*mixed)) + epsilon0
         #x0 = x0 + eta * grad_x0
@@ -89,17 +85,51 @@ def infer(sess, model, hps, iterator, mixed, x0, x1, sigma):
         #x1 = x1 + eta * grad_x1
         #x1 = x1 - eta * lambda_recon * (x0 + x1 - 2*mixed)
 
+        if i == 99: # debugging
+            recon = ((x0 + x1 - 2*mixed)**2).reshape(-1,3*32*32).sum(1).mean()
+            normx = np.linalg.norm(grad_x0.reshape(-1,3*32*32),axis=1).mean()
+            normy = np.linalg.norm(grad_x1.reshape(-1,3*32*32),axis=1).mean()
+            logpx = model.logprob(x0,y).mean()/(32*32*3*np.log(2))
+            logpy = model.logprob(x1,y).mean()/(32*32*3*np.log(2))
+            print('recon: {}, logpx: {}, logpy: {}, normx: {}, normy: {}'.format(recon,logpx,logpy,normx,normy))
+
     write_images(x0, 'x.png')
     write_images(x1, 'y.png')
+    write_images(x0*.5+x1*.5, 'mixed_approx.png')
     return x0, x1
 
-def write_images(x,name):
-    panel = np.zeros([7*32,7*32,3],dtype=np.uint8)
-    for i in range(7):
-        for j in range(7):
-            panel[i*32:(i+1)*32,j*32:(j+1)*32,:] = (256*(x[i*7+j]+.5)).clip(0,255).astype(np.uint8)[:,:,::-1]
+def write_images(x,name,n=7):
+    d = x.shape[1]
+    panel = np.zeros([n*d,n*d,3],dtype=np.uint8)
+    for i in range(n):
+        for j in range(n):
+            panel[i*d:(i+1)*d,j*d:(j+1)*d,:] = (256*(x[i*n+j]+.5)).clip(0,255).astype(np.uint8)[:,:,::-1]
 
-    cv2.imwrite(name, panel)
+    cv2.imwrite('separation/' + name, panel)
+
+
+def estimate_nll(sess, model, hps, iterator):
+    if hps.direct_iterator:
+        iterator = iterator.get_next()
+
+    print('Running inference on {} data points'.format(hps.full_test_its*hps.n_batch_test))
+    logpz = []
+    grad_logpz = []
+    for it in range(hps.full_test_its):
+        if hps.direct_iterator:
+            # replace with x, y, attr if you're getting CelebA attributes, also modify get_data
+            x, y = sess.run(iterator)
+        else:
+            x, y = iterator()
+
+        # preprocess
+        x = x/256. - .5
+        x += np.random.randn(*(x.shape)) * hps.noise_level
+
+        logpz.append(model.logprob(x,y))
+
+    logpz = np.concatenate(logpz, axis=0)
+    print('NLL = {}'.format(-logpz.mean()/(32*32*3*np.log(2))))
 
 
 # ===
@@ -116,7 +146,7 @@ def get_data(hps, sess):
                'imagenet': 1000, 'celeba': 1, 'lsun_realnvp': 1, 'lsun': 1}[hps.problem]
     if hps.data_dir == "":
         hps.data_dir = {'mnist': None, 'cifar10': None, 'imagenet-oord': '/mnt/host/imagenet-oord-tfr', 'imagenet': '/mnt/host/imagenet-tfr',
-                        'celeba': '/mnt/host/celeba-reshard-tfr', 'lsun_realnvp': '/mnt/host/lsun_realnvp', 'lsun': '/mnt/host/lsun'}[hps.problem]
+                        'celeba': 'data/celeba-tfr', 'lsun_realnvp': '/mnt/host/lsun_realnvp', 'lsun': '/mnt/host/lsun'}[hps.problem]
 
     if hps.problem == 'lsun_realnvp':
         hps.rnd_crop = True
@@ -159,7 +189,7 @@ def get_data(hps, sess):
 
 
 def main(hps):
-    
+
     # Initialize Horovod.
     hvd.init()
 
@@ -183,16 +213,25 @@ def main(hps):
     mixed, x0, x1 = generate_mixture(hps, test_iterator, sess) 
 
     hps.inference = True
-    sigmas = np.array([1., 0.35938137, 0.21544347, 0.07742637, 0.04641589, 0.01])
-    all_checkpoints = ['logs1point0','logs0point359','logs0point21','logs0point077','logs0point04','logs0point0']
-    #all_checkpoints = hps.restore_paths
+    #all_checkpoints = ['logs8pt0','logs4pt0','logs2pt0','logs1pt0','logs0pt599','logs0pt359','logs0pt215','logs0pt12','logs0pt077','logs0pt046','logs0pt027']
+    #all_checkpoints = ['logs1point0','logs0point599','logs0point359','logs0point215','logs0point129','logs0point077','logs0point046','logs0point027','logs0point016','logs0point01','logs0point0']
+    all_checkpoints = ['logs2pt0','logs1pt0','logs0pt59','logs0pt35','logs0pt21','logs0pt12','logs0pt07','logs0pt04','logs0pt02','logs0pt016','logs0pt01','logs0pt0']
+    sigmas = np.array([2., 1., 0.59948425, 0.35938137, 0.21544347, 0.12915497, 0.07742637, 0.04641589, 0.02782559, 0.01668101, 0.01, 0.001])
     for sigma,checkpoint in zip(sigmas,all_checkpoints):
-        hps.restore_path = 'cifar10logs/{}/model_best_loss.ckpt'.format(checkpoint)
+        #hps.restore_path = 'bedroom/{}/model_best_loss.ckpt'.format(checkpoint)
+        #hps.restore_path = 'cifar10logs/{}/model_best_loss.ckpt'.format(checkpoint)
+        hps.restore_path = 'logsmnist/{}/model_best_loss.ckpt'.format(checkpoint)
         print("Using checkpoint {}".format(hps.restore_path))
 
         # Create model
         import model
+        train_iterator, test_iterator, data_init = get_data(hps, sess)
         curr_model = model.model(sess, hps, train_iterator, test_iterator, data_init, train=False)
+
+        # For debugging (comment this stuff out to speed things up)
+        hps.noise_level = sigma
+        estimate_nll(sess, curr_model, hps, test_iterator)
+        hps.noise_level = 0
 
         x0, x1 = infer(sess, curr_model, hps, test_iterator, mixed, x0, x1, sigma)
         tf.reset_default_graph()
@@ -319,6 +358,9 @@ if __name__ == "__main__":
                         help="Type of flow. 0=reverse (realnvp), 1=shuffle, 2=invconv (ours)")
     parser.add_argument("--flow_coupling", type=int, default=0,
                         help="Coupling type: 0=additive, 1=affine")
+
+    parser.add_argument("--noise_level", type=float, default=0,
+                        help="Amount of noise to add")
 
     hps = parser.parse_args()  # So error if typo
     main(hps)
