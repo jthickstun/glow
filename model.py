@@ -12,7 +12,7 @@ f_loss: function with as input the (x,y,reuse=False), and as output a list/tuple
 '''
 
 
-def abstract_model_xy(sess, hps, feeds, train_iterator, test_iterator, data_init, lr, f_loss, train=True):
+def abstract_model_xy(sess, hps, feeds, train_iterator, test_iterator, data_init, lr, f_loss, train=True, scope=None):
 
     # == Create class with static fields and methods
     class m(object):
@@ -61,7 +61,12 @@ def abstract_model_xy(sess, hps, feeds, train_iterator, test_iterator, data_init
         m.test = _test
 
     # === Saving and restoring
-    saver = tf.train.Saver()
+    if scope is not None:
+        print('Stripping scope {}'.format(scope))
+        varlist = {v.op.name[len(scope):] : v for v in tf.get_collection(tf.GraphKeys.VARIABLES, scope=scope)}
+        saver = tf.train.Saver(var_list=varlist)
+    else:
+        saver = tf.train.Saver()
 
     if train:
         saver_ema = tf.train.Saver(ema.variables_to_restore())
@@ -146,7 +151,7 @@ def prior(name, y_onehot, hps):
     return logp, sample, eps
 
 
-def model(sess, hps, train_iterator, test_iterator, data_init, train=True):
+def model(sess, hps, train_iterator, test_iterator, data_init, train=True, scope=None):
 
     # Only for decoding/init, rest use iterators directly
     with tf.name_scope('input'):
@@ -233,7 +238,7 @@ def model(sess, hps, train_iterator, test_iterator, data_init, train=True):
 
     feeds = {'x': X, 'y': Y}
     m = abstract_model_xy(sess, hps, feeds, train_iterator,
-                          test_iterator, data_init, lr, f_loss, train=train)
+                          test_iterator, data_init, lr, f_loss, train=train, scope=scope)
 
     print('Defining sampling graph...')
 
