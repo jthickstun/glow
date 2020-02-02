@@ -6,6 +6,8 @@ import os
 import sys
 import time
 
+from itertools import permutations
+
 import cv2
 import horovod.tensorflow as hvd
 import numpy as np
@@ -16,10 +18,20 @@ from utils import ResultLogger
 import tfops as Z
 from model import prior
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt 
+
 learn = tf.contrib.learn
 
 # Surpress verbose warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+def generate_graph(data, axis_label, fname):
+    plt.plot(data)
+    plt.ylabel(axis_label)
+    plt.savefig(fname)
+    plt.close()
 
 def generate_mixture(hps, iterator, sess):
     """
@@ -28,44 +40,46 @@ def generate_mixture(hps, iterator, sess):
     y = np.zeros([hps.n_batch_test], dtype=np.int32)
     if hps.direct_iterator:
         iterator = iterator.get_next()
-        x0, y0 = sess.run(iterator)
-        x1, y1 = sess.run(iterator)
+        gt0, y0 = sess.run(iterator)
+        gt1, y1 = sess.run(iterator)
     else:
-        x0, y0 = iterator()
-        x1, y1 = iterator()
+        gt0, y0 = iterator()
+        gt1, y1 = iterator()
 
-    mixed = x0/2. + x1/2.
+    mixed = gt0/2. + gt1/2.
 
     # preprocessing
-    mixed = mixed/256. - .5
+    mixed = mixed/255. - .5
 
-    write_images(mixed, 'mixed.png')
+    write_images(mixed, os.path.join(hps.logdir_curr, 'mixed.png'))
 
-    # init not too far from the right answer (since we don't have coarser noise models yet)
-    #x0 = x0/256. - .5
-    #x1 = x1/256. - .5
+    # Scale gt to the same scale as x
+    gt0 = gt0/255. - .5
+    gt1 = gt1/255. - .5
 
-    write_images(x0/256.-.5, 'xgt.png')
-    write_images(x1/256.-.5, 'ygt.png')
+    write_images(gt0, os.path.join(hps.logdir_curr, 'xgt.png'))
+    write_images(gt1, os.path.join(hps.logdir_curr, 'ygt.png'))
 
-    recon = (x0 + x1 - 2*mixed)**2
+    recon = (gt0 + gt1 - 2*mixed)**2
 
     # add some noise to make it interesting
-    x0 = np.random.randn(*x0.shape)
-    x1 = np.random.randn(*x1.shape)
+    x0 = np.random.randn(*gt0.shape)
+    x1 = np.random.randn(*gt1.shape)
 
     recon = (x0 + x1 - 2*mixed)**2
 
     write_images(x0, 'x_init.png')
     write_images(x1, 'y_init.png')
 
-    return mixed, x0, x1
+    return mixed, x0, x1, gt0, gt1
 
 
-def infer(sess, model, hps, iterator, mixed, x0, x1, sigma):
+def infer(sess, model, hps, iterator, mixed, x0, x1, sigma, x_logprobs, y_logprobs, recons):
     # Example of using model in inference mode. Load saved model using hps.restore_path
     # Can provide x, y from files instead of dataset iterator
     # If model is uncondtional, always pass y = np.zeros([bs], dtype=np.int32)
+    # tf.set_random_seed(7493220987)
+    # np.random.seed(3344332)
 
     y = np.zeros([hps.n_batch_test], dtype=np.int32)
 
@@ -79,11 +93,7 @@ def infer(sess, model, hps, iterator, mixed, x0, x1, sigma):
         epsilon1 = np.sqrt(2*eta)*np.random.randn(*x1.shape)
 
         x0 = x0 + eta * (grad_x0 - lambda_recon * (x0 + x1 - 2*mixed)) + epsilon0
-        #x0 = x0 + eta * grad_x0
-        #x0 = x0 - eta * lambda_recon * (x0 + x1 - 2*mixed)
         x1 = x1 + eta * (grad_x1 - lambda_recon * (x0 + x1 - 2*mixed)) + epsilon1
-        #x1 = x1 + eta * grad_x1
-        #x1 = x1 - eta * lambda_recon * (x0 + x1 - 2*mixed)
 
         if i == 99: # debugging
             recon = ((x0 + x1 - 2*mixed)**2).reshape(-1,3*32*32).sum(1).mean()
@@ -93,19 +103,22 @@ def infer(sess, model, hps, iterator, mixed, x0, x1, sigma):
             logpy = model.logprob(x1,y).mean()/(32*32*3*np.log(2))
             print('recon: {}, logpx: {}, logpy: {}, normx: {}, normy: {}'.format(recon,logpx,logpy,normx,normy))
 
-    write_images(x0, 'x.png')
-    write_images(x1, 'y.png')
-    write_images(x0*.5+x1*.5, 'mixed_approx.png')
+
+    # generate_graph(x_logprobs, "x logprob", os.path.join(hps.logdir, "x_logprob.png"))
+    # generate_graph(y_logprobs, "y logprob", os.path.join(hps.logdir, "y_logprob.png"))
+    # generate_graph(recons, "reconstruction error", os.path.join(hps.logdir, "recons.png"))
+
     return x0, x1
 
-def write_images(x,name,n=7):
+
+def write_images(x, fname, n=7):
     d = x.shape[1]
     panel = np.zeros([n*d,n*d,3],dtype=np.uint8)
     for i in range(n):
         for j in range(n):
-            panel[i*d:(i+1)*d,j*d:(j+1)*d,:] = (256*(x[i*n+j]+.5)).clip(0,255).astype(np.uint8)[:,:,::-1]
+            panel[i*d:(i+1)*d,j*d:(j+1)*d,:] = (255*(x[i*n+j]+.5)).clip(0,255).astype(np.uint8)[:,:,::-1]
 
-    cv2.imwrite('separation/' + name, panel)
+    cv2.imwrite(fname, panel)
 
 
 def estimate_nll(sess, model, hps, iterator):
@@ -123,7 +136,7 @@ def estimate_nll(sess, model, hps, iterator):
             x, y = iterator()
 
         # preprocess
-        x = x/256. - .5
+        x = x/255. - .5
         x += np.random.randn(*(x.shape)) * hps.noise_level
 
         logpz.append(model.logprob(x,y))
@@ -209,34 +222,104 @@ def main(hps):
     if not os.path.exists(logdir):
         os.mkdir(logdir)
 
-
-    mixed, x0, x1 = generate_mixture(hps, test_iterator, sess) 
-
     hps.inference = True
-    #all_checkpoints = ['logs8pt0','logs4pt0','logs2pt0','logs1pt0','logs0pt599','logs0pt359','logs0pt215','logs0pt12','logs0pt077','logs0pt046','logs0pt027']
-    #all_checkpoints = ['logs1point0','logs0point599','logs0point359','logs0point215','logs0point129','logs0point077','logs0point046','logs0point027','logs0point016','logs0point01','logs0point0']
-    all_checkpoints = ['logs2pt0','logs1pt0','logs0pt59','logs0pt35','logs0pt21','logs0pt12','logs0pt07','logs0pt04','logs0pt02','logs0pt016','logs0pt01','logs0pt0']
-    sigmas = np.array([2., 1., 0.59948425, 0.35938137, 0.21544347, 0.12915497, 0.07742637, 0.04641589, 0.02782559, 0.01668101, 0.01, 0.001])
-    for sigma,checkpoint in zip(sigmas,all_checkpoints):
-        #hps.restore_path = 'bedroom/{}/model_best_loss.ckpt'.format(checkpoint)
-        #hps.restore_path = 'cifar10logs/{}/model_best_loss.ckpt'.format(checkpoint)
-        hps.restore_path = 'logsmnist/{}/model_best_loss.ckpt'.format(checkpoint)
-        print("Using checkpoint {}".format(hps.restore_path))
 
-        # Create model
-        import model
-        train_iterator, test_iterator, data_init = get_data(hps, sess)
-        curr_model = model.model(sess, hps, train_iterator, test_iterator, data_init, train=False)
+    if hps.problem == "cifar10":
+        sigmas = np.array([1., 0.59948425, 0.35938137, 0.21544347, 0.07742637, 0.04641589, 0.01668101, 0.01])
+        all_checkpoints = ['logs1point0', 'logs0point599', 'logs0point359', 'logs0point21', 'logs0point077', 'logs0point04', 'logs0point016', 'logs0point01']
+        base_dir = "cifar10logsJan20"
 
-        # For debugging (comment this stuff out to speed things up)
-        hps.noise_level = sigma
-        estimate_nll(sess, curr_model, hps, test_iterator)
-        hps.noise_level = 0
+    elif hps.problem == "mnist":
+            sigmas = np.array([2., 1., 0.59948425, 0.35938137, 0.21544347, 0.12915497, 0.07742637, 0.04641589, 0.02782559, 0.01668101, 0.01])
+            all_checkpoints = ['logs2pt0', 'logs1pt0', 'logs0pt59', 'logs0pt35', 'logs0pt21', 'logs0pt12', 'logs0point07', 'logs0point04', 'logs0point027', 'logs0point016', 'logs0pt01']
+            base_dir = "logsmnist"
 
-        x0, x1 = infer(sess, curr_model, hps, test_iterator, mixed, x0, x1, sigma)
-        tf.reset_default_graph()
-        sess = tensorflow_session()
+    all_psnr = []
+    # Run many iterations of the algorithm 
+    for iteration in range(50):
+        hps.logdir_curr = os.path.join(hps.logdir, "{:07d}".format(iteration))
+        if not os.path.exists(hps.logdir_curr):
+            os.makedirs(hps.logdir_curr)
 
+        # For graphing purposes. Not being used now 
+        x_logprobs = []
+        y_logprobs = []
+        recons = []
+
+        mixed, x0, x1, gt0, gt1 = generate_mixture(hps, test_iterator, sess)
+
+        for sigma,checkpoint in zip(sigmas,all_checkpoints):
+            hps.restore_path = '{}/{}/model_best_loss.ckpt'.format(base_dir, checkpoint)
+            print("Using checkpoint {}".format(hps.restore_path))
+
+            # Create model
+            import model
+            train_iterator, test_iterator, data_init = get_data(hps, sess)
+            curr_model = model.model(sess, hps, train_iterator, test_iterator, data_init, train=False)
+
+            # For debugging (comment this stuff out to speed things up)
+            #hps.noise_level = sigma
+            #estimate_nll(sess, curr_model, hps, test_iterator)
+            #hps.noise_level = 0
+
+            x0, x1 = infer(sess, curr_model, hps, test_iterator, mixed, x0, x1, sigma,
+                            x_logprobs, y_logprobs, recons)
+
+            tf.reset_default_graph()
+            sess = tensorflow_session()
+
+            new_psnr, output_to_write = permutations_psnr([x0, x1], [gt0, gt1])
+            print(new_psnr)
+            write_images(output_to_write[0], os.path.join(hps.logdir_curr, "x_{}.png".format(sigma)))
+            write_images(output_to_write[1], os.path.join(hps.logdir_curr, "y_{}.png".format(sigma)))
+            write_images(x0*.5+x1*.5, os.path.join(hps.logdir_curr, 'mixed_approx_{}.png'.format(sigma)))
+
+            
+
+        all_psnr += new_psnr
+        print("Average PSNR: {}".format(sum(all_psnr) / len(all_psnr)))
+
+
+def permutations_psnr(output, gt):
+    """
+    Calculates the psnr of output to gt while handling the per image alignment
+        output_x is an array of separated numpy arrays (handles arbitrary many separation)
+        gt is an array of the ground truth numpy arrays
+    Returns an array of elementwise psnr averages, and an array of reordered images to write
+    """
+    assert(len(output) == len(gt))
+    N = len(output)  # Number of images to separate
+    x_to_write = []
+    for i in range(N):
+        x_to_write.append(output[i].copy())
+
+    all_psnr = []
+    for idx in range(output[0].shape[0]):
+        best_psnr = -10000
+        best_permutation = None
+
+        # Try all permutations of the outputs with the ground truths
+        for permutation in permutations(range(N)):
+            curr_psnr = sum([psnr(output[permutation[i]][idx], gt[i][idx]) for i in range(N)])
+            if curr_psnr > best_psnr:
+                best_psnr = curr_psnr
+                best_permutation = permutation
+
+        all_psnr.append(best_psnr / float(N))
+        for i in range(N):
+            x_to_write[i][idx] = output[best_permutation[i]][idx]
+
+    return all_psnr, x_to_write
+
+def psnr(est, gt, trim=True):
+    """
+    Returns the P signal to noise ratio between the estimate and gt
+    Trim means we have to convert both to grayscale and trim to 28 x 28 (MNIST)
+    """
+    if trim:
+        est = est[2:-2, 2:-2,:].mean(2)
+        gt = gt[2:-2, 2:-2, :].mean(2)
+    return float(-10 * np.log10(((est - gt) ** 2).mean()))
 
 # Get number of training and validation iterations
 def get_its(hps):
@@ -358,7 +441,6 @@ if __name__ == "__main__":
                         help="Type of flow. 0=reverse (realnvp), 1=shuffle, 2=invconv (ours)")
     parser.add_argument("--flow_coupling", type=int, default=0,
                         help="Coupling type: 0=additive, 1=affine")
-
     parser.add_argument("--noise_level", type=float, default=0,
                         help="Amount of noise to add")
 
