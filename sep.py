@@ -33,11 +33,8 @@ def generate_graph(data, axis_label, fname):
     plt.savefig(fname)
     plt.close()
 
-def generate_mixture(hps, iterator, sess):
-    """
-    Generates a mixture and returns the noisy samples used
-    """
-    y = np.zeros([hps.n_batch_test], dtype=np.int32)
+def get_inputs_no_split(hps, iterator, sess):
+    """Gets two inputs without considering class"""
     if hps.direct_iterator:
         iterator = iterator.get_next()
         gt0, y0 = sess.run(iterator)
@@ -45,6 +42,43 @@ def generate_mixture(hps, iterator, sess):
     else:
         gt0, y0 = iterator()
         gt1, y1 = iterator()
+
+    return gt0, gt1
+
+def get_inputs_split(hps, iterator, sess, labels0, labels1):
+    """
+    Gets two inputs such that gt0 belongs to labels0 and
+    gt1 belongs to labels1
+    """
+    gt0 = []
+    gt1 = []
+
+    # Continuously sample and assign to the right batch
+    while ((len(gt0) < hps.n_batch_test) or (len(gt1) < hps.n_batch_test)):
+        # Get a new set of inputs
+        if hps.direct_iterator:
+            iterator = iterator.get_next()
+            x, y = sess.run(iterator)
+        else:
+            x, y = iterator()
+
+        # Iterate and assign to the correct gt based on label
+        for idx in range(y.shape[0]):
+            if y[idx] in labels0 and (len(gt0) < hps.n_batch_test):
+                gt0.append(x[idx])
+
+            elif y[idx] in labels1 and (len(gt1) < hps.n_batch_test):
+                gt1.append(x[idx])
+
+    return np.stack(gt0, axis=0), np.stack(gt1, axis=0)
+
+
+def generate_mixture(hps, iterator, sess):
+    """
+    Generates a mixture and returns the noisy samples used
+    """
+    #gt0, gt1 = get_inputs_no_split(hps, iterator, sess)
+    gt0, gt1 = get_inputs_split(hps, iterator, sess, range(5), range(5, 10))
 
     mixed = gt0/2. + gt1/2.
 
@@ -236,7 +270,7 @@ def main(hps):
 
     all_psnr = []
     # Run many iterations of the algorithm 
-    for iteration in range(50):
+    for iteration in range(80):
         hps.logdir_curr = os.path.join(hps.logdir, "{:07d}".format(iteration))
         if not os.path.exists(hps.logdir_curr):
             os.makedirs(hps.logdir_curr)
@@ -254,7 +288,6 @@ def main(hps):
 
             # Create model
             import model
-            train_iterator, test_iterator, data_init = get_data(hps, sess)
             curr_model = model.model(sess, hps, train_iterator, test_iterator, data_init, train=False)
 
             # For debugging (comment this stuff out to speed things up)
@@ -278,6 +311,8 @@ def main(hps):
 
         all_psnr += new_psnr
         print("Average PSNR: {}".format(sum(all_psnr) / len(all_psnr)))
+    import pdb
+    pdb.set_trace()
 
 
 def permutations_psnr(output, gt):

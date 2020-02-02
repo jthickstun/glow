@@ -91,7 +91,7 @@ def get_data(problem, shards, rank, data_augmentation_level, n_batch_train, n_ba
     datagen_train.fit(x_train)
     datagen_test.fit(x_test)
     train_flow = datagen_train.flow(x_train, y_train, n_batch_train)
-    test_flow = datagen_test.flow(x_test, y_test, n_batch_test, shuffle=False)
+    test_flow = datagen_test.flow(x_test, y_test, n_batch_test, shuffle=True)
 
     def make_iterator(flow, resolution):
         def iterator():
