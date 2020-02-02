@@ -162,14 +162,12 @@ def model(sess, hps, train_iterator, test_iterator, data_init, train=True):
 
     def preprocess(x):
         x = tf.cast(x, 'float32')
-
-        noise = tf.random.normal(tf.shape(x)) * hps.noise_level
-        x += noise
-
         if hps.n_bits_x < 8:
             x = tf.floor(x / 2 ** (8 - hps.n_bits_x))
         x = x / hps.n_bins - .5
-        return x
+
+        noise = tf.random.normal(tf.shape(x)) * hps.noise_level
+        return x + noise
 
     def postprocess(x):
         return tf.cast(tf.clip_by_value(tf.floor((x + .5)*hps.n_bins)*(256./hps.n_bins), 0, 255), 'uint8')
