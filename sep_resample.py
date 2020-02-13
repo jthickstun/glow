@@ -77,8 +77,8 @@ def generate_mixture(hps, iterator, sess):
     """
     Generates a mixture and returns the noisy samples used
     """
-    gt0, gt1 = get_inputs_no_split(hps, iterator, sess)
-    #gt0, gt1 = get_inputs_split(hps, iterator, sess, range(5), range(5, 10))
+    #gt0, gt1 = get_inputs_no_split(hps, iterator, sess)
+    gt0, gt1 = get_inputs_split(hps, iterator, sess, range(5), range(5, 10))
 
     mixed = gt0/2. + gt1/2.
 
@@ -138,11 +138,8 @@ def infer(sess, model, hps, iterator, mixed, x0, x1, sigma, x_logprobs, y_logpro
             print('recon: {}, logpx: {}, logpy: {}, normx: {}, normy: {}'.format(recon,logpx,logpy,normx,normy))
 
 
-    # generate_graph(x_logprobs, "x logprob", os.path.join(hps.logdir, "x_logprob.png"))
-    # generate_graph(y_logprobs, "y logprob", os.path.join(hps.logdir, "y_logprob.png"))
-    # generate_graph(recons, "reconstruction error", os.path.join(hps.logdir, "recons.png"))
 
-    return x0, x1
+    return x0, x1, model.logprob(x0,y), model.logprob(x1,y)
 
 
 def write_images(x, fname, n=7):
@@ -269,6 +266,8 @@ def main(hps):
             base_dir = "logsmnist"
 
     all_psnr = []
+    N_SAMPLES = 10
+
     # Run many iterations of the algorithm 
     for iteration in range(80):
         hps.logdir_curr = os.path.join(hps.logdir, "{:07d}".format(iteration))
@@ -281,6 +280,15 @@ def main(hps):
         recons = []
 
         mixed, x0, x1, gt0, gt1 = generate_mixture(hps, test_iterator, sess)
+
+        x0_multiple = []
+        for _ in range(N_SAMPLES):
+            x0_multiple.append(x0.copy())
+
+        x1_multiple = []
+        for _ in range(N_SAMPLES):
+            x1_multiple.append(x1.copy())
+
 
         for sigma,checkpoint in zip(sigmas,all_checkpoints):
             hps.restore_path = '{}/{}/model_best_loss.ckpt'.format(base_dir, checkpoint)
@@ -295,13 +303,35 @@ def main(hps):
             #estimate_nll(sess, curr_model, hps, test_iterator)
             #hps.noise_level = 0
 
-            x0, x1 = infer(sess, curr_model, hps, test_iterator, mixed, x0, x1, sigma,
-                            x_logprobs, y_logprobs, recons)
+            all_probx0 = []
+            all_probx1 = []
+            for i in range(N_SAMPLES):
+                x0, x1, probx0, probx1 = infer(sess, curr_model, hps, test_iterator, mixed, x0_multiple[i],
+                                               x1_multiple[i], sigma, x_logprobs, y_logprobs, recons)
+                x0_multiple[i] = x0
+                x1_multiple[i] = x1
+                all_probx0.append(probx0)
+                all_probx1.append(probx1)
+
+            all_probx0 = np.array(all_probx0)
+            all_probx1 = np.array(all_probx1)
+
+            best_idx = np.argmax((all_probx0 + all_probx1), axis=0)
+
+            best_x0 = []
+            best_x1 = []
+            for sample_idx in range(best_idx.shape[0]):  # n_batch_test
+                curr_best_idx = best_idx[sample_idx]
+                best_x0.append(x0_multiple[curr_best_idx][sample_idx])
+                best_x1.append(x1_multiple[curr_best_idx][sample_idx])
+
+            best_x0 = np.array(best_x0)
+            best_x1 = np.array(best_x1)
 
             tf.reset_default_graph()
             sess = tensorflow_session()
 
-            new_psnr, output_to_write = permutations_psnr([x0, x1], [gt0, gt1])
+            new_psnr, output_to_write = permutations_psnr([best_x0, best_x1], [gt0, gt1])
             print(new_psnr)
             write_images(output_to_write[0], os.path.join(hps.logdir_curr, "x_{}.png".format(sigma)))
             write_images(output_to_write[1], os.path.join(hps.logdir_curr, "y_{}.png".format(sigma)))

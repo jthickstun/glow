@@ -6,6 +6,8 @@ import os
 import sys
 import time
 
+from itertools import permutations
+
 import cv2
 import horovod.tensorflow as hvd
 import numpy as np
@@ -16,74 +18,101 @@ from utils import ResultLogger
 import tfops as Z
 from model import prior
 
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt 
+
 learn = tf.contrib.learn
 
 # Surpress verbose warnings
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
+
 def g(x):
-    return np.repeat(x.mean(axis=3,keepdims=True),3,axis=3)
+    return np.repeat(x.mean(axis=3,keepdims=True), 3, axis=3)
 
 def init(hps, iterator, sess):
-    xl = []
-    for i in range(hps.n_batch_test):
-        if hps.direct_iterator:
-            it = iterator.get_next()
-            x, y = sess.run(it)
-            x, y = sess.run(it)
-            x, y = sess.run(it)
-        else:
-            x, y = iterator()
-        xl.append(x)
+    if hps.direct_iterator:
+        iterator = iterator.get_next()
+        x, y = sess.run(iterator)
+    else:
+        x, y = iterator()
 
-    x = np.concatenate(xl,axis=0)/256. - .5
-    xg = g(x)
+    x = x / 256. - 0.5
+    x_gray = g(x)
 
-    x_init = 2*np.random.randn(*x.shape)
+    x_init = np.random.randn(*x.shape)
 
-    write_images(x, 'color_orig.png')
-    write_images(xg, 'greyscale.png')
-    write_images(x_init, 'color_init.png')
+    write_images(x, os.path.join(hps.logdir_curr, 'color_orig.png'))
+    write_images(x_gray, os.path.join(hps.logdir_curr, 'grayscale.png'))
+    write_images(x_init, os.path.join(hps.logdir_curr, 'color_init.png'))
 
-    return xg, x_init
+    return x_gray, x_init
 
 
-def infer(sess, model, hps, xg, x, sigma):
+def infer(sess, model, hps, iterator, x_gray, x, sigma):
     # Example of using model in inference mode. Load saved model using hps.restore_path
     # Can provide x, y from files instead of dataset iterator
     # If model is uncondtional, always pass y = np.zeros([bs], dtype=np.int32)
+    # tf.set_random_seed(7493220987)
+    # np.random.seed(3344332)
+    y = np.zeros([hps.n_batch_test], dtype=np.int32)
 
-    y = np.zeros([1], dtype=np.int32)
+    eta = .00001 * (sigma / .01) ** 2
+    lambda_recon = 1.0/(sigma**2)
+    for i in range(100):
+        grad_x = model.grad_logprob(x, y)
 
-    eta = .0001 * (sigma / .01) ** 2
-    lambda_recon = 1./(sigma**2)
-    for i in range(500):
-        for j in range(1):
-            grad_xj = model.grad_logprob(x[j:j+1],y)
+        epsilon = np.sqrt(2*eta)*np.random.randn(*x.shape)
 
-            if j == 0:
-                recon = (g(x)[j:j+1] - xg[j:j+1])**2
-                normx = np.linalg.norm(grad_xj.reshape(-1,3*32*32),axis=1).mean()
-                minx,maxx,meanx = x[j:j+1].min(),x[j:j+1].max(),np.abs(x[j:j+1]).mean()
-                print('recon: {}, logpx: {}, normx: {}, minx: {}, maxx: {}, meanabs: {}'.format(recon[0].sum(),model.logprob(x[j:j+1],y)[0],normx,minx,maxx,meanx))
+        x = x + eta * (grad_x - lambda_recon * (g(x) - x_gray)) + epsilon
 
-            epsilon = np.sqrt(2*eta)*np.random.randn(*(x[j:j+1].shape))
-            x[j:j+1] = x[j:j+1] + eta * (grad_xj - lambda_recon * (g(x)[j:j+1] - xg[j:j+1])) + epsilon
+        if True: #i == 0: # debugging
+            recon = ((g(x) - x_gray)**2).mean()
+            normx = np.linalg.norm(grad_x.reshape(-1,3*32*32),axis=1).mean()
+            logpx = model.logprob(x,y).mean()/(32*32*3*np.log(2))
+            print('recon: {}, logpx: {}, normx: {}'.format(recon, logpx, normx))
 
-        if i % 29 == 0:
-            write_images(x, 'color{}_{}.png'.format(sigma,i))
-            write_images(g(x), 'mixed{}_{}.png'.format(sigma,i))
+
+    # generate_graph(x_logprobs, "x logprob", os.path.join(hps.logdir, "x_logprob.png"))
+    # generate_graph(y_logprobs, "y logprob", os.path.join(hps.logdir, "y_logprob.png"))
+    # generate_graph(recons, "reconstruction error", os.path.join(hps.logdir, "recons.png"))
 
     return x
 
-def write_images(x,name,n=1):
+
+def write_images(x, fname, n=10):
     d = x.shape[1]
     panel = np.zeros([n*d,n*d,3],dtype=np.uint8)
     for i in range(n):
         for j in range(n):
-            panel[i*d:(i+1)*d,j*d:(j+1)*d,:] = (256*(x[i*n+j]+.5)).clip(0,255).astype(np.uint8)[:,:,::-1]
+            panel[i*d:(i+1)*d,j*d:(j+1)*d,:] = (255*(x[i*n+j]+.5)).clip(0,255).astype(np.uint8)[:,:,::-1]
 
-    cv2.imwrite('color/' + name, panel)
+    cv2.imwrite(fname, panel)
+
+
+def estimate_nll(sess, model, hps, iterator):
+    if hps.direct_iterator:
+        iterator = iterator.get_next()
+
+    print('Running inference on {} data points'.format(hps.full_test_its*hps.n_batch_test))
+    logpz = []
+    grad_logpz = []
+    for it in range(hps.full_test_its):
+        if hps.direct_iterator:
+            # replace with x, y, attr if you're getting CelebA attributes, also modify get_data
+            x, y = sess.run(iterator)
+        else:
+            x, y = iterator()
+
+        # preprocess
+        x = x/255. - .5
+        x += np.random.randn(*(x.shape)) * hps.noise_level
+
+        logpz.append(model.logprob(x,y))
+
+    logpz = np.concatenate(logpz, axis=0)
+    print('NLL = {}'.format(-logpz.mean()/(32*32*3*np.log(2))))
 
 
 # ===
@@ -112,8 +141,7 @@ def get_data(hps, sess):
 
     # Use anchor_size to rescale batch size based on image_size
     s = hps.anchor_size
-    hps.local_batch_train = hps.n_batch_train * \
-        s * s // (hps.image_size * hps.image_size)
+    hps.local_batch_train = hps.n_batch_train * s * s // (hps.image_size * hps.image_size)
     hps.local_batch_test = {64: 50, 32: 25, 16: 10, 8: 5, 4: 2, 2: 2, 1: 1}[
         hps.local_batch_train]  # round down to closest divisor of 50
     hps.local_batch_init = hps.n_batch_init * \
@@ -132,9 +160,11 @@ def get_data(hps, sess):
     elif hps.problem in ['mnist', 'cifar10']:
         hps.direct_iterator = False
         import data_loaders.get_mnist_cifar as v
+            #v.get_data(hps.problem, hvd.size(), hvd.rank(), hps.dal, hps.local_batch_train,
+            #           hps.local_batch_test, hps.local_batch_init, hps.image_size)
         train_iterator, test_iterator, data_init = \
             v.get_data(hps.problem, hvd.size(), hvd.rank(), hps.dal, hps.local_batch_train,
-                       hps.local_batch_test, hps.local_batch_init, hps.image_size)
+                       hps.n_batch_test, hps.local_batch_init, hps.image_size)
 
     else:
         raise Exception()
@@ -143,7 +173,7 @@ def get_data(hps, sess):
 
 
 def main(hps):
-    
+
     # Initialize Horovod.
     hvd.init()
 
@@ -158,25 +188,55 @@ def main(hps):
     train_iterator, test_iterator, data_init = get_data(hps, sess)
     hps.train_its, hps.test_its, hps.full_test_its = get_its(hps)
 
-    xg, x = init(hps, test_iterator, sess) 
+    # Create log dir
+    logdir = os.path.abspath(hps.logdir) + "/"
+    if not os.path.exists(logdir):
+        os.mkdir(logdir)
 
     hps.inference = True
-    #sigmas = np.array([4.,2.,1., 0.59948425, 0.35938137, 0.21544347, 0.12915497, 0.07742637, 0.04641589, 0.02782559, 0.])
-    sigmas = np.array([1., 0.59948425, 0.35938137, 0.21544347, 0.12915497, 0.07742637, 0.04641589, 0.02782559, 0.01])
-    #all_checkpoints = ['logs4pt0','logs2pt0','logs1pt0','logs0pt599','logs0pt359','logs0pt215','logs0pt12','logs0pt077','logs0pt046','logs0pt027','celeba_checkpoint2']
-    all_checkpoints = ['logs1pt0','logs0pt599','logs0pt359','logs0pt215','logs0pt12','logs0pt077','logs0pt046','logs0pt027','celeba_checkpoint2']
-    for sigma,checkpoint in zip(sigmas,all_checkpoints):
-        hps.restore_path = 'celebalogs/{}/model_best_loss.ckpt'.format(checkpoint)
-        print("Using checkpoint {}".format(hps.restore_path))
 
-        # Create model
-        import model
-        train_iterator, test_iterator, data_init = get_data(hps, sess)
-        curr_model = model.model(sess, hps, train_iterator, test_iterator, data_init, train=False)
+    if hps.problem == "cifar10":
+        sigmas = np.array([1., 0.59948425, 0.35938137, 0.21544347, 0.12915497, 0.07742637, 0.04641589, 0.02782559, 0.01668101, 0.01])
+        all_checkpoints = ['logs1point0', 'logs0point599', 'logs0point359', 'logs0point215', 'logs0point129', 'logs0point077', 'logs0point046', 'logs0point027', 'logs0point016', 'logs0point01']
+        base_dir = "cifar_finetune"
 
-        x = infer(sess, curr_model, hps, xg, x, sigma)
-        tf.reset_default_graph()
-        sess = tensorflow_session()
+    elif hps.problem == "mnist":
+            sigmas = np.array([2., 1., 0.59948425, 0.35938137, 0.21544347, 0.12915497, 0.07742637, 0.04641589, 0.02782559, 0.01668101, 0.01])
+            all_checkpoints = ['logs2pt0', 'logs1pt0', 'logs0pt59', 'logs0pt35', 'logs0pt21', 'logs0pt12', 'logs0point07', 'logs0point04', 'logs0point027', 'logs0point016', 'logs0pt01']
+            base_dir = "logsmnist"
+
+    # Run many iterations of the algorithm 
+    for iteration in range(475, 500):
+        hps.logdir_curr = os.path.join(hps.logdir, "{:07d}".format(iteration))
+        if not os.path.exists(hps.logdir_curr):
+            os.makedirs(hps.logdir_curr)
+
+        x_gray, x = init(hps, test_iterator, sess)
+
+        for sigma,checkpoint in zip(sigmas,all_checkpoints):
+            hps.restore_path = '{}/{}/model_best_loss.ckpt'.format(base_dir, checkpoint)
+            print("Using checkpoint {}".format(hps.restore_path))
+
+            # Create model
+            import model
+            curr_model = model.model(sess, hps, train_iterator, test_iterator, data_init, train=False)
+
+            # For debugging (comment this stuff out to speed things up)
+            #hps.noise_level = sigma
+            #estimate_nll(sess, curr_model, hps, test_iterator)
+            #hps.noise_level = 0
+
+            x = infer(sess, curr_model, hps, test_iterator, x_gray, x, sigma)
+
+            tf.reset_default_graph()
+            sess = tensorflow_session()
+
+            write_images(x, os.path.join(hps.logdir_curr, "x_{}.png".format(sigma)))
+            write_images(g(x), os.path.join(hps.logdir_curr, 'grayscale_approx_{}.png'.format(sigma)))
+
+
+    import pdb
+    pdb.set_trace()
 
 
 # Get number of training and validation iterations
@@ -246,7 +306,7 @@ if __name__ == "__main__":
     parser.add_argument("--n_batch_train", type=int,
                         default=64, help="Minibatch size")
     parser.add_argument("--n_batch_test", type=int,
-                        default=50, help="Minibatch size")
+                        default=100, help="Minibatch size")
     parser.add_argument("--n_batch_init", type=int, default=256,
                         help="Minibatch size for data-dependent init")
     parser.add_argument("--optimizer", type=str,
@@ -299,7 +359,6 @@ if __name__ == "__main__":
                         help="Type of flow. 0=reverse (realnvp), 1=shuffle, 2=invconv (ours)")
     parser.add_argument("--flow_coupling", type=int, default=0,
                         help="Coupling type: 0=additive, 1=affine")
-
     parser.add_argument("--noise_level", type=float, default=0,
                         help="Amount of noise to add")
 
